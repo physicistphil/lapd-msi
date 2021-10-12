@@ -5,8 +5,9 @@ import io
 import multiprocessing as mp
 import numpy as np
 import datetime
+import tables
 
-from LV_binary_files.LVBF_buff import LV_fd
+from LVBF_buff import LV_fd
 
 
 def receive_data(q, HOST, PORT):
@@ -35,12 +36,62 @@ def receive_data(q, HOST, PORT):
             q.put(data)
 
 
-def save_data(q, filename="data.hdf5"):
-    class Discharge():
-        pass
+class Discharge(tables.IsDescription):
+    discharge_current = tables.Float32Col(shape=(4096,))
+    discharge_voltage = tables.Float32Col(shape=(4096,))
 
-    shot = Discharge()
+    interferometer_signals = tables.Float64Col(shape=(1, 4096))
+    interferometer_t0_seconds = tables.Int64Col(shape=(1,))
+    interferometer_t0_fraction = tables.UInt64Col(shape=(1,))
+    interferometer_dt = tables.Float64Col(shape=(1,))
+
+    diode_signals = tables.Float64Col(shape=(3, 4096))
+    diode_t0_seconds = tables.Int64Col(3,)
+    diode_t0_fraction = tables.Int64Col(3,)
+    diode_dt = tables.Float64Col(shape=(3,))
+
+    datarun_timeout = tables.BoolCol()
+    datarun_key = tables.StringCol(128)
+    datarun_shotnum = tables.UInt32Col()
+    datarun_status = tables.UInt16Col()
+    datarun_timestamp = tables.Float64Col()
+
+    MSI_timeout = tables.BoolCol()
+    MSI_timestamp = tables.Float64Col()
+
+    heater_valid = tables.BoolCol()
+    heater_current = tables.Float32Col()
+    heater_voltage = tables.Float32Col()
+    heater_temp = tables.Float32Col()
+
+    pressure_valid = tables.BoolCol()
+    RGA_valid = tables.BoolCol()
+    pressure_fill = tables.Float32Col()
+    RGA_peak = tables.Float32Col()
+    RGA_partials = tables.Float32Col(shape=(50,))
+
+    magnet_valid = tables.BoolCol()
+    magnet_profile = tables.Float32Col(shape=(1024,))
+    magnet_supplies = tables.Float32Col(shape=(13,))
+    magnet_peak = tables.Float32Col()
+
+    internal_shotnum = tables.Int32Col()
+
+
+def save_data(q, path="saved_MSI/"):
+    temp_data = {}
     shotnum = -1
+    norun_shotnum = -1
+    curr_datarun = ''
+
+    time_str = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S.%f")
+    norun_h5file = tables.open_file(path + time_str + ".h5", 'a', title="Data--" + time_str)
+    norun_group = norun_h5file.create_group("/", 'MSI', 'MSI and diagnostics')
+    norun_table = norun_h5file.create_table(norun_group, 'data', Discharge, 'Discharge data')
+    norun_shot = norun_table.row
+
+    run_h5file = None
+
     while True:
         shotnum += 1
         # print("Queue size: {}.".format(q.qsize()), end=' ')
@@ -49,66 +100,116 @@ def save_data(q, filename="data.hdf5"):
 
         reader.fobj = buffer
         while reader.offset < len(buffer):
-            shot.discharge_current = (reader.read_array(reader.read_numeric, d='>f4'))
-            shot.discharge_voltage = (reader.read_array(reader.read_numeric, d='>f4'))
+            temp_data['discharge_current'] = (reader.read_array(reader.read_numeric, d='>f4'))
+            temp_data['discharge_voltage'] = (reader.read_array(reader.read_numeric, d='>f4'))
 
-            shot.interferometer_signals = (reader.read_array(reader.read_numeric, d='>f8', ndims=2))
-            shot.interferometer_t0 = (reader.read_array(reader.read_timestamp))
-            shot.interferometer_dt = (reader.read_array(reader.read_numeric, d='>f8'))
+            temp_data['interferometer_signals'] = (reader.read_array(reader.read_numeric, d='>f8', ndims=2))
+            inter_t0 = (reader.read_array(reader.read_timestamp))
+            temp_data['interferometer_t0_seconds'] = np.array([inter_t0[i][0] for i in range(inter_t0.shape[0])], dtype=np.int64)
+            temp_data['interferometer_t0_fraction'] = np.array([inter_t0[i][1] for i in range(inter_t0.shape[0])], dtype=np.uint64)
+            temp_data['interferometer_dt'] = (reader.read_array(reader.read_numeric, d='>f8'))
 
-            shot.diode_signals = (reader.read_array(reader.read_numeric, d='>f8', ndims=2))
-            shot.diode_t0 = (reader.read_array(reader.read_timestamp))
-            shot.diode_dt = (reader.read_array(reader.read_numeric, d='>f8'))
+            temp_data['diode_signals'] = (reader.read_array(reader.read_numeric, d='>f8', ndims=2))
+            diode_t0 = (reader.read_array(reader.read_timestamp))
+            temp_data['diode_t0_seconds'] = np.array([diode_t0[i][0] for i in range(diode_t0.shape[0])], dtype=np.int64)
+            temp_data['diode_t0_fraction'] = np.array([diode_t0[i][1] for i in range(diode_t0.shape[0])], dtype=np.uint64)
+            temp_data['diode_dt'] = (reader.read_array(reader.read_numeric, d='>f8'))
 
-            shot.datarun_timeout = (reader.read_boolean())
-            shot.datarun_key = (reader.read_string())
-            shot.datarun_shotnum = (reader.read_numeric(d='>u4'))
-            shot.datarun_status = (reader.read_numeric(d='>u2'))
-            shot.datarun_timestamp = (reader.read_numeric(d='>f8'))
+            temp_data['datarun_timeout'] = (reader.read_boolean())
+            temp_data['datarun_key'] = (reader.read_string())[0]
+            temp_data['datarun_shotnum'] = (reader.read_numeric(d='>u4'))
+            temp_data['datarun_status'] = (reader.read_numeric(d='>u2'))
+            temp_data['datarun_timestamp'] = (reader.read_numeric(d='>f8'))
 
-            shot.MSI_timeout = (reader.read_boolean())
-            shot.MSI_timestamp = (reader.read_numeric(d='>f8'))
+            temp_data['MSI_timeout'] = (reader.read_boolean())
+            temp_data['MSI_timestamp'] = (reader.read_numeric(d='>f8'))
 
-            shot.heater_valid = (reader.read_boolean())
-            shot.heater_current = (reader.read_numeric(d='>f4'))
-            shot.heater_voltage = (reader.read_numeric(d='>f4'))
-            shot.heater_temp = (reader.read_numeric(d='>f4'))
+            temp_data['heater_valid'] = (reader.read_boolean())
+            temp_data['heater_current'] = (reader.read_numeric(d='>f4'))
+            temp_data['heater_voltage'] = (reader.read_numeric(d='>f4'))
+            temp_data['heater_temp'] = (reader.read_numeric(d='>f4'))
 
-            shot.pressure_valid = (reader.read_boolean())
-            shot.RGA_valid = (reader.read_boolean())
-            shot.pressure_fill = (reader.read_numeric(d='>f4'))
-            shot.RGA_peak = (reader.read_numeric(d='>f4'))
-            shot.RGA_partials = (reader.read_array(reader.read_numeric, d='>f4'))
+            temp_data['pressure_valid'] = (reader.read_boolean())
+            temp_data['RGA_valid'] = (reader.read_boolean())
+            temp_data['pressure_fill'] = (reader.read_numeric(d='>f4'))
+            temp_data['RGA_peak'] = (reader.read_numeric(d='>f4'))
+            temp_data['RGA_partials'] = (reader.read_array(reader.read_numeric, d='>f4'))
 
-            shot.magnet_valid = (reader.read_boolean())
-            shot.magnet_profile = (reader.read_array(reader.read_numeric, d='>f4'))
-            shot.magnet_supplies = (reader.read_array(reader.read_numeric, d='>f4'))
-            shot.magnet_peak = (reader.read_numeric(d='>f4'))
+            temp_data['magnet_valid'] = (reader.read_boolean())
+            temp_data['magnet_profile'] = (reader.read_array(reader.read_numeric, d='>f4'))
+            temp_data['magnet_supplies'] = (reader.read_array(reader.read_numeric, d='>f4'))
+            temp_data['magnet_peak'] = (reader.read_numeric(d='>f4'))
 
-        max_diode = np.max(np.array(shot.diode_signals[0]))
-        ts_sec = shot.diode_t0['seconds'][0]
-        ts_frac = shot.diode_t0['fraction'][0]
-        ts_datarun = datetime.datetime.fromtimestamp(int(shot.datarun_timestamp))
-        ts_datarun_frac = np.modf(shot.datarun_timestamp)[0]
-        if shot.datarun_timeout == 1:
-            print("Shotnum (internal) {}. Max diode reading: {}. "
-                  "MSI time: {}.{}".format(shotnum, max_diode, ts_sec, ts_frac))
+            temp_data["internal_shotnum"] = shotnum
+
+        # Switch files if the datarun changed.
+        if curr_datarun != temp_data['datarun_key']:
+            if run_h5file is not None:
+                run_h5file.close()
+
+            curr_datarun = temp_data['datarun_key']
+            run_h5file = tables.open_file(path + temp_data['datarun_key'] + ".h5", 'a',
+                                          title="Data--" + temp_data['datarun_key'])
+            if run_h5file.__contains__("/MSI"):
+                run_group = run_h5file.get_node("/MSI")
+                run_table = run_h5file.get_node("/MSI/data")
+            else:
+                run_group = run_h5file.create_group("/", 'MSI', 'MSI and diagnostics')
+                run_table = run_h5file.create_table(run_group, 'data', Discharge, 'Discharge data')
+            # except tables.exceptions.NodeError:
+            #     run_group = run_h5file.MSI
+            run_shot = run_table.row
+
+        # Save to separate file if datarun timed out, else save to datarun file.
+        if temp_data['datarun_timeout'] == 1:
+            norun_shotnum += 1
+            for key in temp_data:
+                norun_shot[key] = temp_data[key]
+            norun_shot.append()
+            norun_table.flush()
+            print("Saved: norun shot {}. ".format(shotnum), end="")
+        else:
+            for key in temp_data:
+                run_shot[key] = temp_data[key]
+            run_shot.append()
+            run_table.flush()
+            print("Saved: " + temp_data['datarun_key'] + " shot {}. ".format(shotnum), end="")
+
+        if norun_shotnum >= 16383:
+            norun_shotnum = -1
+            norun_h5file.close()
+
+            # Open new file
+            time_str = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S.%f")
+            norun_h5file = tables.open_file(path + time_str + ".h5", 'a', title="Data--" + time_str)
+            norun_group = norun_h5file.create_group("/", 'MSI', 'MSI and diagnostics')
+            norun_table = norun_h5file.create_table(norun_group, 'data', Discharge, 'Discharge data')
+            norun_shot = norun_table.row
+
+        max_diode = np.max(np.array(temp_data['diode_signals'][0]))
+        ts_sec = temp_data['diode_t0_seconds'][0]
+        ts_frac = temp_data['diode_t0_fraction'][0]
+        ts_datarun = datetime.datetime.fromtimestamp(int(temp_data['datarun_timestamp']))
+        ts_datarun_frac = np.modf(temp_data['datarun_timestamp'])[0]
+        if temp_data['datarun_timeout'] == 1:
+            print("Max diode reading: {}. "
+                  "MSI time: {}.{}".format(max_diode, ts_sec, ts_frac))
         else:
             print("Shotnum {}. Time: {}.{:0.4}. Max diode reading: {}. "
-                  "MSI time: {}.{}".format(shot.datarun_shotnum, ts_datarun, ts_datarun_frac,
-                                           max_diode, ts_sec, ts_frac))
+                  "MSI time: {}.{}".format(temp_data['datarun_shotnum'], ts_datarun,
+                                           ts_datarun_frac, max_diode, ts_sec, ts_frac))
 
 
 if __name__ == '__main__':
     HOST = '192.168.7.54'
     PORT = 27182
-    filename = "test.txt"
+    savepath = "saved_MSI/"
 
     q = mp.Queue()
     # p_read, p_write = mp.Pipe(duplex=False)
 
     tcp_process = mp.Process(target=receive_data, args=(q, HOST, PORT))
-    save_process = mp.Process(target=save_data, args=(q, filename))
+    save_process = mp.Process(target=save_data, args=(q, savepath))
 
     tcp_process.start()
     save_process.start()
