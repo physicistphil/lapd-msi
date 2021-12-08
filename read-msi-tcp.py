@@ -218,5 +218,8 @@ if __name__ == '__main__':
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        tcp_process.terminate()
         tcp_process.join()
         save_process.join()
+        tcp_process.close()
+        save_process.close()
