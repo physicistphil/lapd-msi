@@ -14,10 +14,10 @@ def receive_data(q, HOST, PORT):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((HOST, PORT))
         while True:
-            # print("Size request")
+            # Size request
             s.sendall(struct.pack(">i", 1))
+            # Wait for response
             data_length = struct.unpack(">i", s.recv(4))[0]
-            # print("Size: {}".format(data_length))
 
             data = b''
             data_remaining = data_length
@@ -216,10 +216,7 @@ if __name__ == '__main__':
 
     try:
         while True:
-            pass
+            time.sleep(1)
     except KeyboardInterrupt:
         tcp_process.join()
         save_process.join()
-
-
-# s.makefile
