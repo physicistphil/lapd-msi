@@ -181,7 +181,9 @@ def save_data(q, path="saved_MSI/"):
             run_table.flush()
             print("Saved: " + temp_data['datarun_key'] + " shot {}. ".format(shotnum), end="")
 
-        if norun_shotnum >= 16383:
+        # This magic number controls how many shots are in one file when there isn't a datarun.
+        # 16383 is roughly 1/5th a day. 172800 is roughly two days
+        if norun_shotnum >= 172800:
             norun_shotnum = -1
             norun_h5file.close()
 
