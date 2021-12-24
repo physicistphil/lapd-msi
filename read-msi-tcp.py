@@ -40,6 +40,9 @@ class Discharge(tables.IsDescription):
     discharge_current = tables.Float32Col(shape=(4096,))
     discharge_voltage = tables.Float32Col(shape=(4096,))
 
+    north_discharge_current = tables.Float32Col(shape=(4096,))
+    north_discharge_voltage = tables.Float32Col(shape=(4096,))
+
     interferometer_signals = tables.Float64Col(shape=(1, 4096))
     interferometer_t0_seconds = tables.Int64Col(shape=(1,))
     interferometer_t0_fraction = tables.UInt64Col(shape=(1,))
@@ -102,6 +105,9 @@ def save_data(q, path="saved_MSI/"):
         while reader.offset < len(buffer):
             temp_data['discharge_current'] = (reader.read_array(reader.read_numeric, d='>f4'))
             temp_data['discharge_voltage'] = (reader.read_array(reader.read_numeric, d='>f4'))
+
+            temp_data['north_discharge_current'] = (reader.read_array(reader.read_numeric, d='>f4'))
+            temp_data['north_discharge_voltage'] = (reader.read_array(reader.read_numeric, d='>f4'))
 
             temp_data['interferometer_signals'] = (reader.read_array(reader.read_numeric, d='>f8', ndims=2))
             inter_t0 = (reader.read_array(reader.read_timestamp))
