@@ -6,6 +6,8 @@ import multiprocessing as mp
 import numpy as np
 import datetime
 import tables
+import mysql.connector
+import re
 
 from LVBF_buff import LV_fd
 
@@ -95,6 +97,10 @@ def save_data(q, path="saved_MSI/"):
 
     run_h5file = None
 
+    # Compile the regex pattern for use with the datarun_key
+    num_pat = re.compile(r"\b\d+")
+    proj_pat = re.compile(r"\w+\.h5")
+
     while True:
         shotnum += 1
         # print("Queue size: {}.".format(q.qsize()), end=' ')
@@ -154,7 +160,27 @@ def save_data(q, path="saved_MSI/"):
                 run_h5file.close()
 
             curr_datarun = temp_data['datarun_key']
-            run_h5file = tables.open_file(path + temp_data['datarun_key'] + ".h5", 'a',
+
+            # Try looking up datarun in the MySQL database on the control room PC
+            try:
+                num = num_pat.search(curr_datarun + ".h5").__getitem__(0)
+                proj = proj_pat.search(curr_datarun + ".h5").__getitem__(0)[:-3]
+                cnx = mysql.connector.connect(user='readonly', password='uLTentENEnTIncioUtIO',
+                                              host='192.168.7.3')
+                cursor = cnx.cursor(buffered=True)
+                try:
+                    cursor.execute("SELECT data_run_name FROM {}.data_runs WHERE data_run_id in ({});".format(proj, num))
+                    (run_name,) = cursor.fetchall()[0]
+                except Exception as e:
+                    print(e)
+                cursor.close()
+                cnx.disconnect()
+                filename = "{} {} {}".format(proj, num, run_name)
+            except Exception as e:
+                print(e)
+                filename = curr_datarun
+
+            run_h5file = tables.open_file(path + filename + ".h5", 'a',
                                           title="Data--" + temp_data['datarun_key'])
             if run_h5file.__contains__("/MSI"):
                 run_group = run_h5file.get_node("/MSI")
@@ -173,13 +199,13 @@ def save_data(q, path="saved_MSI/"):
                 norun_shot[key] = temp_data[key]
             norun_shot.append()
             norun_table.flush()
-            print("Saved: norun shot {}. ".format(shotnum), end="")
+            print("Saved: shot {} in {}. ".format(shotnum, time_str), end="")
         else:
             for key in temp_data:
                 run_shot[key] = temp_data[key]
             run_shot.append()
             run_table.flush()
-            print("Saved: " + temp_data['datarun_key'] + " shot {}. ".format(shotnum), end="")
+            print("Saved: shot {} in " + filename + ". ".format(shotnum), end="")
 
         # This magic number controls how many shots are in one file when there isn't a datarun.
         # 16383 is roughly 1/5th a day. 172800 is roughly two days
@@ -203,7 +229,7 @@ def save_data(q, path="saved_MSI/"):
             print("Max diode reading: {}. "
                   "MSI time: {}.{}".format(max_diode, ts_sec, ts_frac))
         else:
-            print("Shotnum {}. Time: {}.{:0.4}. Max diode reading: {}. "
+            print("Datarun shot: {}. Time: {}.{:0.4}. Max diode reading: {}. "
                   "MSI time: {}.{}".format(temp_data['datarun_shotnum'], ts_datarun,
                                            ts_datarun_frac, max_diode, ts_sec, ts_frac))
 
