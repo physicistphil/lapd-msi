@@ -205,7 +205,7 @@ def save_data(q, path="saved_MSI/"):
                 run_shot[key] = temp_data[key]
             run_shot.append()
             run_table.flush()
-            print("Saved: shot {} in " + filename + ". ".format(shotnum), end="")
+            print("Saved: shot {} in ".format(shotnum) + filename + ". ", end="")
 
         # This magic number controls how many shots are in one file when there isn't a datarun.
         # 16383 is roughly 1/5th a day. 172800 is roughly two days
