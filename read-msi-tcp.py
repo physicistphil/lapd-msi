@@ -3,6 +3,7 @@ import socket
 import struct
 import io
 import multiprocessing as mp
+import queue
 import numpy as np
 import datetime
 import tables
@@ -12,9 +13,13 @@ import re
 from LVBF_buff import LV_fd
 
 
+# Receive data from the MSI system / old housekeeping labview program
 def receive_data(q, HOST, PORT):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((HOST, PORT))
+
+        # This doesn't need the request-response things here -- this and the labview code needs to
+        #   be edited (it's this way because I didn't quite know what I was doing)
         while True:
             # Size request
             s.sendall(struct.pack(">i", 1))
@@ -31,11 +36,33 @@ def receive_data(q, HOST, PORT):
                 s.sendall(struct.pack(">i", 2))
                 part = s.recv(BUFF_LEN if data_remaining > BUFF_LEN else data_remaining)
                 data += part
-                data_remaining -= BUFF_LEN
+                data_remaining -= len(part)
                 # print(data_remaining)
             # print("Data received. Length: {}".format(len(data)))
 
             q.put(data)
+
+
+# Receive data from the spectrometer server
+def receive_data_spec(q_spec, HOST, PORT):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((HOST, PORT))
+
+        while True:
+            # Get data size
+            data_length = struct.unpack(">i", s.recv(4))[0]
+
+            data = b''
+            data_remaining = data_length
+
+            BUFF_LEN = 1024
+            while data_remaining > 0:
+                part = s.recv(BUFF_LEN if data_remaining > BUFF_LEN else data_remaining)
+                data += part
+                data_remaining -= len(part)
+
+            spec_data = np.frombuffer(data, dtype=np.float).reshape(2, -1)
+            q_spec.put(spec_data)
 
 
 class Discharge(tables.IsDescription):
@@ -82,8 +109,10 @@ class Discharge(tables.IsDescription):
 
     internal_shotnum = tables.Int32Col()
 
+    spectrometer = tables.Float64Col(shape=(2, 3648))
 
-def save_data(q, path="saved_MSI/"):
+
+def save_data(q, q_spec, path="saved_MSI/"):
     temp_data = {}
     shotnum = -1
     norun_shotnum = -1
@@ -101,10 +130,17 @@ def save_data(q, path="saved_MSI/"):
     num_pat = re.compile(r"\b\d+")
     proj_pat = re.compile(r"\w+\.h5")
 
+    # Loop to:
+    #   get MSI information
+    #   get spectrometer information
+    #   switch files (if necessary)
+    #   save the info to a h5 file
     while True:
         shotnum += 1
         # print("Queue size: {}.".format(q.qsize()), end=' ')
-        buffer = q.get()
+
+        # We want this to be a blocking call -- no discharge information = no plasma
+        buffer = q.get(block=True, timeout=None)
         reader = LV_fd(endian='>', encoding='cp1252')
 
         reader.fobj = buffer
@@ -154,6 +190,18 @@ def save_data(q, path="saved_MSI/"):
 
             temp_data["internal_shotnum"] = shotnum
 
+        # Wait at most 0.2 seconds
+        try:
+            spec_data = q_spec.get(block=True, timeout=0.2)
+            # Make sure we get the most recent spectrometer information in case there is a hangup
+            # Might want to check if this is actually a problem first.
+            # while q_spec.empty() is False:
+            #     spec_data = q_spec.get(block=True, timeout=0.2)
+            temp_data['spectrometer'] = spec_data
+        except queue.Empty:
+            print("Spectrometer offline")
+            temp_data['spectrometer'] = np.zeros((2, 3648), dtype=np.float)
+
         # Switch files if the datarun changed.
         if curr_datarun != temp_data['datarun_key']:
             if run_h5file is not None:
@@ -161,7 +209,8 @@ def save_data(q, path="saved_MSI/"):
 
             curr_datarun = temp_data['datarun_key']
 
-            # Try looking up datarun in the MySQL database on the control room PC
+            # Try looking up datarun in the MySQL database on the control room PC.
+            # This makes it much easier to match up the MSI to the datarun later.
             try:
                 num = num_pat.search(curr_datarun + ".h5").__getitem__(0)
                 proj = proj_pat.search(curr_datarun + ".h5").__getitem__(0)[:-3]
@@ -235,25 +284,38 @@ def save_data(q, path="saved_MSI/"):
 
 
 if __name__ == '__main__':
+    # Old housekeeping computer / connection to get MSI
     HOST = '192.168.7.54'
     PORT = 27182
+    # Raspberry pi that has the spectrometer attached (and digitizers eventually)
+    HOST_spec = '192.168.7.91'
+    PORT_spec = 5004
+
     savepath = "saved_MSI/"
 
     q = mp.Queue()
+    q_spec = mp.Queue()
     # p_read, p_write = mp.Pipe(duplex=False)
 
     tcp_process = mp.Process(target=receive_data, args=(q, HOST, PORT))
+    tcp_process_spec = mp.Process(target=receive_data_spec, args=(q_spec, HOST_spec, PORT_spec))
     save_process = mp.Process(target=save_data, args=(q, savepath))
 
     tcp_process.start()
+    tcp_process_spec.start()
     save_process.start()
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        print("Interrupting processes...")
+    finally:
         tcp_process.terminate()
         tcp_process.join()
+        tcp_process_spec.terminate()
+        tcp_process_spec.join()
         save_process.join()
         tcp_process.close()
+        tcp_process_spec.close()
         save_process.close()
