@@ -18,8 +18,10 @@ def receive_data(q, HOST, PORT):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((HOST, PORT))
 
-        # This doesn't need the request-response things here -- this and the labview code needs to
-        #   be edited (it's this way because I didn't quite know what I was doing)
+        # This response-request paradigm is unncessary -- this and the labview code needs to
+        #   be edited. It's this way because I didn't quite know what I was doing when I first wrote
+        #   it and I was compensating for lost info (but it was because I just didn't check how
+        #   long the received data actually was and assumed it was 1024)
         while True:
             # Size request
             s.sendall(struct.pack(">i", 1))
@@ -258,7 +260,7 @@ def save_data(q, q_spec, path="saved_MSI/"):
 
         # This magic number controls how many shots are in one file when there isn't a datarun.
         # 16383 is roughly 1/5th a day. 172800 is roughly two days
-        if norun_shotnum >= 172800:
+        if norun_shotnum >= 86400:
             norun_shotnum = -1
             norun_h5file.close()
 
