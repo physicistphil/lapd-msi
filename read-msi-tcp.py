@@ -47,24 +47,30 @@ def receive_data(q, HOST, PORT):
 
 # Receive data from the spectrometer server
 def receive_data_spec(q_spec, HOST, PORT):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((HOST, PORT))
 
-        while True:
-            # Get data size
-            data_length = struct.unpack(">i", s.recv(4))[0]
+                while True:
+                    # Get data size
+                    data_length = struct.unpack(">i", s.recv(4))[0]
 
-            data = b''
-            data_remaining = data_length
+                    data = b''
+                    data_remaining = data_length
 
-            BUFF_LEN = 1024
-            while data_remaining > 0:
-                part = s.recv(BUFF_LEN if data_remaining > BUFF_LEN else data_remaining)
-                data += part
-                data_remaining -= len(part)
+                    BUFF_LEN = 1024
+                    while data_remaining > 0:
+                        part = s.recv(BUFF_LEN if data_remaining > BUFF_LEN else data_remaining)
+                        data += part
+                        data_remaining -= len(part)
 
-            spec_data = np.frombuffer(data, dtype=np.float).reshape(2, -1)
-            q_spec.put(spec_data)
+                    spec_data = np.frombuffer(data, dtype=np.float).reshape(2, -1)
+                    q_spec.put(spec_data)
+        except Exception as e:
+            print("Spectrometer client exception: ")
+            print(repr(e))
+            time.sleep(0.5)
 
 
 class Discharge(tables.IsDescription):
@@ -301,7 +307,7 @@ if __name__ == '__main__':
 
     tcp_process = mp.Process(target=receive_data, args=(q, HOST, PORT))
     tcp_process_spec = mp.Process(target=receive_data_spec, args=(q_spec, HOST_spec, PORT_spec))
-    save_process = mp.Process(target=save_data, args=(q, savepath))
+    save_process = mp.Process(target=save_data, args=(q, q_spec, savepath))
 
     tcp_process.start()
     tcp_process_spec.start()

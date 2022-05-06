@@ -11,7 +11,7 @@ import numpy as np
 HOST = '192.168.7.91'
 PORT = 5004
 
-trig_val = 0
+trig_val = 3
 int_time_micros = 20000
 
 spectrometer = SpecInfo()
@@ -21,6 +21,7 @@ while True:
     try:
         print("Starting server")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((HOST, PORT))
             sock.listen()
             connection, address = sock.accept()
@@ -33,9 +34,9 @@ while True:
                     connection.send(struct.pack(">i", spec_size_bytes))
                     connection.sendall(spec_data.tobytes())
                     print("-", end="", flush=True)
-                    time.sleep(2)
+
     except Exception as e:
         print("Server raised exception: ")
         print(repr(e))
-    time.sleep(0.25)
+    time.sleep(1)
 
