@@ -9,6 +9,7 @@ import datetime
 import tables
 import mysql.connector
 import re
+import datetime
 
 from LVBF_buff import LV_fd
 
@@ -217,6 +218,7 @@ def save_data(q, q_spec, path="saved_MSI/"):
 
             curr_datarun = temp_data['datarun_key']
 
+            print("Switching datarun file.")
             # Try looking up datarun in the MySQL database on the control room PC.
             # This makes it much easier to match up the MSI to the datarun later.
             try:
@@ -259,7 +261,10 @@ def save_data(q, q_spec, path="saved_MSI/"):
             print("Saved: shot {} in {}. ".format(shotnum, time_str), end="")
         else:
             for key in temp_data:
-                run_shot[key] = temp_data[key]
+                try:
+                    run_shot[key] = temp_data[key]
+                except KeyError as e:
+                    print("Key error: " + str(e) + ". Continuing without.")
             run_shot.append()
             run_table.flush()
             print("Saved: shot {} in ".format(shotnum) + filename + ". ", end="")
@@ -270,6 +275,7 @@ def save_data(q, q_spec, path="saved_MSI/"):
             norun_shotnum = -1
             norun_h5file.close()
 
+            print("Creating new file to keep file sizes reasonable.")
             # Open new file
             time_str = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S.%f")
             norun_h5file = tables.open_file(path + time_str + ".h5", 'a', title="Data--" + time_str)
@@ -278,17 +284,16 @@ def save_data(q, q_spec, path="saved_MSI/"):
             norun_shot = norun_table.row
 
         max_diode = np.max(np.array(temp_data['diode_signals'][0]))
-        ts_sec = temp_data['diode_t0_seconds'][0]
-        ts_frac = temp_data['diode_t0_fraction'][0]
+        ts_sec = datetime.datetime.fromtimestamp(temp_data['diode_t0_seconds'][0])
+        ts_frac = temp_data['diode_t0_fraction'][0].astype('u8') / 2 ** 64
         ts_datarun = datetime.datetime.fromtimestamp(int(temp_data['datarun_timestamp']))
         ts_datarun_frac = np.modf(temp_data['datarun_timestamp'])[0]
         if temp_data['datarun_timeout'] == 1:
-            print("Max diode reading: {}. "
-                  "MSI time: {}.{}".format(max_diode, ts_sec, ts_frac))
+            print("MSI time: {}+{:0.4}".format(ts_sec, ts_frac))
         else:
-            print("Datarun shot: {}. Time: {}.{:0.4}. Max diode reading: {}. "
-                  "MSI time: {}.{}".format(temp_data['datarun_shotnum'], ts_datarun,
-                                           ts_datarun_frac, max_diode, ts_sec, ts_frac))
+            print("Datarun shot: {}. Time: {}.{:0.4}. "
+                  "MSI time: {}+{:0.4}".format(temp_data['datarun_shotnum'], ts_datarun,
+                                           ts_datarun_frac, ts_sec, ts_frac))
 
 
 if __name__ == '__main__':
