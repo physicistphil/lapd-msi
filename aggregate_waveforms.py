@@ -1,0 +1,613 @@
+import time
+import datetime
+import tables
+import glob
+from tqdm import tqdm
+from scipy.signal import hilbert
+from scipy import constants as const
+import re
+import numpy as np
+import math
+import os
+import matplotlib.pyplot as plt
+import pyformulas as pf
+
+# From https://github.com/dgua/lecroy:
+#
+# This is a module for reading binary files from LeCroy scopes.
+#
+# LeCroy binary files have a .trc extension. This module reads version 'LECROY_2_3' of
+# the format (an exception is raised if a different format is encountered).
+#
+# Dependencies: numpy, math.
+#
+# D. Guarisco, 2013-2018. Assembled from various sources.
+#
+# Version history:
+#   1.0         2013-02-10  First release
+#   1.1         2013-02-13  Added support for sequence acquisitions. Fixed a few bugs.
+#   1.2         2013-07-30  Correctly handles the case where WAVEDESC block starts at the                            beginning of the file (i.e., there is no file size info)
+#   1.3         2013-08-27  Correctly imports FFT traces. TIMEBASE and FIXED VERT GAIN
+#                           reflect horizontal and vertical units.
+#   1.4         2018-12-24  Ported to Python 3 (no longer works in Python 2).
+#                           Correctly reports FILE_SIZE in WAVEDESC.
+#   1.5         2019-04-27  Replaced string decoding from standard 'utf-8' to 'latin_1'
+#                           because utf-8 would generate errors on some .trc files.
+#                           Fixed bug with file size (try to read it from file and rely on
+#                           OS if it's missing).
+#
+
+#
+#
+
+
+def float2eng(f):
+    """
+    Converts a floating point number to its engineering representation using SI prefixes.
+    """
+    if f != 0:
+        ex = math.floor(math.log(abs(f), 10))
+    else:
+        ex = 0
+    exeng = ex - ex % 3
+    if exeng < -24:
+        exeng = -24
+    else:
+        if exeng > 24:
+            exeng = 24
+    mant = f / (10**exeng)
+    prefix = 'yzafpnum kMGTPEZY'
+    id = int((exeng + 24) / 3)
+    if id == 8:
+        up = ''
+    else:
+        up = prefix[id]
+    return "%g %s" % (mant, up)
+#
+#
+
+
+def ReadBinaryTrace(filePath):
+    """
+    Reads a binary LeCroy file (file extension: .trc). Only version 'LECROY_2_3' of the 
+    format is supported. A detailed description of the format can be obtained from the 
+    instrument by issuing the command 'TEMPLATE?'
+
+    The following results are returned:
+        (WAVEDESC,USER_TEXT,x,y1,y2), where
+
+    WAVEDESC is the file header, containing information about the waveform
+    USER_TEXT is an optional string (empty by default)
+    x  is a numpy array (dtype='float64') containing the time offsets of the waveform 
+       relative to the trigger time
+    y1 is a numpy array (dtype='float64') containing the primary waveform
+    y2 is a numpy array (dtype='float64') containing the secondary waveform (empty for a
+       single sweep acquisition).
+
+    The shape of the arrays x and y depends on the mode of the scope during the data
+    acquisition. If the scope is not in sequence mode (SUBARRAY_COUNT=1) a single sweep
+    was captured. In this case, x and y1 are one-dimensional arrays of size
+    WAVE_ARRAY_COUNT. If the scope was in sequence mode, several sweeps (SUBARRAY_COUNT) 
+    were captured in sequence. In this case, the shape of x and y is a two-dimensional
+    array(SUBARRAY_COUNT,WAVE_ARRAY_COUNT/SUBARRAY_COUNT).
+
+    WAVEDESC is a dict with the keys shown below, which are exactly as described
+    in the file template documentation, with the following exceptions:
+    1. For enum types, an extra key (KEY_INDEX) has been added, containing the int
+       index (starting at zero), as indicated in the list below
+    2. TRIGGER_TIME is a tuple: (seconds:float64, minutes:int8, hours:int8, days:int8,
+       months:int8, year:int16, unused:int16)
+    3. FILE_SIZE (in bytes) has been added
+
+        Parameter name                          Type
+        DESCRIPTOR_NAME                         string(16)
+        TEMPLATE_NAME                           string(16)
+        COMM_TYPE_INDEX (enum index)            np.int16
+        COMM_TYPE                               string
+        COMM_ORDER_INDEX (enum index)           np.int16
+        COMM_ORDER                              string
+        WAVE_DESCRIPTOR                         np.int32
+        USER_TEXT                               np.int32
+        RES_DESC1                               np.int32
+        TRIGTIME_ARRAY                          np.int32
+        RIS_TIME_ARRAY                          np.int32
+        RES_ARRAY1                              np.int32
+        WAVE_ARRAY_1                            np.int32
+        WAVE_ARRAY_2                            np.int32
+        RES_ARRAY2                              np.int32
+        RES_ARRAY3                              np.int32
+        INSTRUMENT_NAME                         string(16)
+        INSTRUMENT_NUMBER                       np.int32
+        TRACE_LABEL                             string(16)
+        RESERVED1                               np.int16
+        RESERVED2                               np.int16
+        WAVE_ARRAY_COUNT                        np.int32
+        PNTS_PER_SCREEN                         np.int32
+        FIRST_VALID_PNT                         np.int32
+        LAST_VALID_PNT                          np.int32
+        FIRST_POINT                             np.int32
+        SPARSING_FACTOR                         np.int32
+        SEGMENT_INDEX                           np.int32
+        SUBARRAY_COUNT                          np.int32
+        SWEEPS_PER_ACQ                          np.int32
+        POINTS_PER_PAIR                         np.int16
+        PAIR_OFFSET                             np.int16
+        VERTICAL_GAIN                           np.float32
+        VERTICAL_OFFSET                         np.float32
+        MAX_VALUE                               np.float32
+        MIN_VALUE                               np.float32
+        NOMINAL_BITS                            np.int16
+        NOM_SUBARRAY_COUNT                      np.int16
+        HORIZ_INTERVAL                          np.float32
+        HORIZ_OFFSET                            np.float64
+        PIXEL_OFFSET                            np.float64
+        VERTUNIT                                string(48)
+        HORUNIT                                 string(48)
+        HORIZ_UNCERTAINTY                       np.float32
+        TRIGGER_TIME                            tuple
+        ACQ_DURATION                            np.float32
+        RECORD_TYPE_INDEX (enum index)          np.int16
+        RECORD_TYPE                             string
+        PROCESSING_DONE_INDEX (enum index)      np.int16
+        PROCESSING_DONE                         string
+        RESERVED5                               np.int16
+        RIS_SWEEPS                              np.int16
+        TIMEBASE_INDEX (enum index)             np.int.16
+        TIMEBASE                                string
+        VERT_COUPLING_INDEX                     np.int16
+        VERT_COUPLING                           string
+        PROBE_ATT                               np.float32
+        FIXED_VERT_GAIN_INDEX (enum index)      np.int16
+        FIXED_VERT_GAIN                         string
+        BANDWIDTH_LIMIT_INDEX (enum index)      np.int16
+        BANDWIDTH_LIMIT                         string
+        VERTICAL_VERNIER                        np.float32
+        ACQ_VERT_OFFSET                         np.float32
+        WAVE_SOURCE_INDEX (enum index)          np.int16
+        WAVE_SOURCE                             string
+        FILE_SIZE                               int
+    """
+    # Open binary data file for read
+    with open(filePath, 'rb') as dataFile:
+        # Read wave descriptor block
+        str2 = dataFile.read(32)
+        startOffset = str2.find(b'WAVEDESC')
+        if startOffset == -1:
+            raise RuntimeError('File is not in a recognizable format')
+            return
+        DESCRIPTOR_NAME = str2[startOffset:startOffset + 16].rstrip(b'\0x00').decode('latin_1')
+        # Try to read file size, if present
+        try:
+            #fileSize = int.from_bytes(str2[4:startOffset],byteorder='little') + startOffset
+            fileSize = int(str2[2:startOffset])
+        except ValueError:
+            fileSize = os.path.getsize(filePath)
+        # Find COMM_ORDER first. Use this byte order in all subsequent reads from file
+        dataFile.seek(startOffset + 34)
+        COMM_ORDER_INDEX = np.fromfile(dataFile, dtype='<i2', count=1)[0]
+        COMM_ORDER = ('HIFIRST', 'LOFIRST')[COMM_ORDER_INDEX]
+        if COMM_ORDER == 'LOFIRST':
+            co = '<'
+        else:
+            co = '>'
+        # Now read all other header parameters
+        dataFile.seek(startOffset + 16)
+        TEMPLATE_NAME = dataFile.read(16).rstrip(b'\0x00').decode('latin_1')
+        if TEMPLATE_NAME != 'LECROY_2_3':
+            raise RuntimeError('Template version different from LECROY_2_3')
+            return
+        COMM_TYPE_INDEX = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        COMM_TYPE = ('byte', 'word')[COMM_TYPE_INDEX]
+        dataFile.seek(startOffset + 36)
+        WAVE_DESCRIPTOR = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        USER_TEXT = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        RES_DESC1 = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        TRIGTIME_ARRAY = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        RIS_TIME_ARRAY = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        RES_ARRAY1 = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        WAVE_ARRAY_1 = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        WAVE_ARRAY_2 = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        RES_ARRAY2 = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        RES_ARRAY3 = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        INSTRUMENT_NAME = dataFile.read(16).rstrip(b'\x00').decode('latin_1')
+        INSTRUMENT_NUMBER = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        TRACE_LABEL = dataFile.read(16).rstrip(b'\x00').decode('latin_1')
+        RESERVED1 = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        RESERVED2 = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        WAVE_ARRAY_COUNT = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        PNTS_PER_SCREEN = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        FIRST_VALID_PNT = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        LAST_VALID_PNT = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        FIRST_POINT = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        SPARSING_FACTOR = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        SEGMENT_INDEX = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        SUBARRAY_COUNT = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        SWEEPS_PER_ACQ = np.fromfile(dataFile, dtype=co + 'i4', count=1)[0]
+        POINTS_PER_PAIR = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        PAIR_OFFSET = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        VERTICAL_GAIN = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        VERTICAL_OFFSET = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        MAX_VALUE = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        MIN_VALUE = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        NOMINAL_BITS = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        NOM_SUBARRAY_COUNT = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        HORIZ_INTERVAL = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        HORIZ_OFFSET = np.fromfile(dataFile, dtype=co + 'f8', count=1)[0]
+        PIXEL_OFFSET = np.fromfile(dataFile, dtype=co + 'f8', count=1)[0]
+        VERTUNIT = dataFile.read(48).rstrip(b'\0x00').decode('latin_1')
+        HORUNIT = dataFile.read(48).rstrip(b'\0x00').decode('latin_1')
+        HORIZ_UNCERTAINTY = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        TRIGGER_TIME_SECONDS = np.fromfile(dataFile, dtype=co + 'f8', count=1)[0]
+        TRIGGER_TIME_MINUTES = np.fromfile(dataFile, dtype=np.int8, count=1)[0]
+        TRIGGER_TIME_HOURS = np.fromfile(dataFile, dtype=np.int8, count=1)[0]
+        TRIGGER_TIME_DAYS = np.fromfile(dataFile, dtype=np.int8, count=1)[0]
+        TRIGGER_TIME_MONTHS = np.fromfile(dataFile, dtype=np.int8, count=1)[0]
+        TRIGGER_TIME_YEAR = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        TRIGGER_TIME_UNUSED = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        ACQ_DURATION = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        RECORD_TYPE_INDEX = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        RECORD_TYPE = ('single sweep', 'interleaved', 'histogram', 'graph', 'filter_coefficient',
+                       'complex', 'extrema', 'sequence obsolete', 'centered RIS', 'peak detect')[RECORD_TYPE_INDEX]
+        PROCESSING_DONE_INDEX = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        PROCESSING_DONE = ('no processing', 'fir filter', 'interpolated', 'sparsed',
+                           'autoscaled', 'no result', 'rolling', 'cumulative')[PROCESSING_DONE_INDEX]
+        RESERVED5 = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        RIS_SWEEPS = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        TIMEBASE_INDEX = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        if TIMEBASE_INDEX == 100:
+            TIMEBASE = 'EXTERNAL'
+        else:
+            divisions = (1, 2, 5)
+            mant = divisions[TIMEBASE_INDEX % 3]
+            exp = int(TIMEBASE_INDEX / 3) - 12
+            t = mant * 10**exp
+            TIMEBASE = float2eng(t) + HORUNIT + '/div'
+        VERT_COUPLING_INDEX = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        VERT_COUPLING = ('DC 50 Ohms', 'ground', 'DC 1MOhm',
+                         'ground', 'AC 1MOhm')[VERT_COUPLING_INDEX]
+        PROBE_ATT = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        FIXED_VERT_GAIN_INDEX = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        mant = divisions[FIXED_VERT_GAIN_INDEX % 3]
+        exp = int(FIXED_VERT_GAIN_INDEX / 3) - 6
+        t = mant * 10**exp
+        FIXED_VERT_GAIN = float2eng(t) + VERTUNIT + '/div'
+        BANDWIDTH_LIMIT_INDEX = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        BANDWIDTH_LIMIT = ('off', 'on')[BANDWIDTH_LIMIT_INDEX]
+        VERTICAL_VERNIER = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        ACQ_VERT_OFFSET = np.fromfile(dataFile, dtype=co + 'f4', count=1)[0]
+        WAVE_SOURCE_INDEX = np.fromfile(dataFile, dtype=co + 'i2', count=1)[0]
+        WAVE_SOURCE = 'C%d' % (WAVE_SOURCE_INDEX + 1)
+        # Sanity check
+        coffset = dataFile.tell() - startOffset
+        if coffset != WAVE_DESCRIPTOR:
+            raise RuntimeError('Wave descriptor is too long!')
+            return
+        # Create WAVEDESC dict
+        WAVEDESC = {'DESCRIPTOR_NAME': DESCRIPTOR_NAME}
+        WAVEDESC['TEMPLATE_NAME'] = TEMPLATE_NAME
+        WAVEDESC['COMM_TYPE_INDEX'] = COMM_TYPE_INDEX
+        WAVEDESC['COMM_TYPE'] = COMM_TYPE
+        WAVEDESC['COMM_ORDER_INDEX'] = COMM_ORDER_INDEX
+        WAVEDESC['COMM_ORDER'] = COMM_ORDER
+        WAVEDESC['WAVE_DESCRIPTOR'] = WAVE_DESCRIPTOR
+        WAVEDESC['USER_TEXT'] = USER_TEXT
+        WAVEDESC['RES_DESC1'] = RES_DESC1
+        WAVEDESC['TRIGTIME_ARRAY'] = TRIGTIME_ARRAY
+        WAVEDESC['RIS_TIME_ARRAY'] = RIS_TIME_ARRAY
+        WAVEDESC['RES_ARRAY1'] = RES_ARRAY1
+        WAVEDESC['WAVE_ARRAY_1'] = WAVE_ARRAY_1
+        WAVEDESC['WAVE_ARRAY_2'] = WAVE_ARRAY_2
+        WAVEDESC['RES_ARRAY2'] = RES_ARRAY2
+        WAVEDESC['RES_ARRAY3'] = RES_ARRAY3
+        WAVEDESC['INSTRUMENT_NAME'] = INSTRUMENT_NAME
+        WAVEDESC['INSTRUMENT_NUMBER'] = INSTRUMENT_NUMBER
+        WAVEDESC['TRACE_LABEL'] = TRACE_LABEL
+        WAVEDESC['RESERVED1'] = RESERVED1
+        WAVEDESC['RESERVED2'] = RESERVED2
+        WAVEDESC['WAVE_ARRAY_COUNT'] = WAVE_ARRAY_COUNT
+        WAVEDESC['PNTS_PER_SCREEN'] = PNTS_PER_SCREEN
+        WAVEDESC['FIRST_VALID_PNT'] = FIRST_VALID_PNT
+        WAVEDESC['LAST_VALID_PNT'] = LAST_VALID_PNT
+        WAVEDESC['FIRST_POINT'] = FIRST_POINT
+        WAVEDESC['SPARSING_FACTOR'] = SPARSING_FACTOR
+        WAVEDESC['SEGMENT_INDEX'] = SEGMENT_INDEX
+        WAVEDESC['SUBARRAY_COUNT'] = SUBARRAY_COUNT
+        WAVEDESC['SWEEPS_PER_ACQ'] = SWEEPS_PER_ACQ
+        WAVEDESC['POINTS_PER_PAIR'] = POINTS_PER_PAIR
+        WAVEDESC['PAIR_OFFSET'] = PAIR_OFFSET
+        WAVEDESC['VERTICAL_GAIN'] = VERTICAL_GAIN
+        WAVEDESC['VERTICAL_OFFSET'] = VERTICAL_OFFSET
+        WAVEDESC['MAX_VALUE'] = MAX_VALUE
+        WAVEDESC['MIN_VALUE'] = MIN_VALUE
+        WAVEDESC['NOMINAL_BITS'] = NOMINAL_BITS
+        WAVEDESC['NOM_SUBARRAY_COUNT'] = NOM_SUBARRAY_COUNT
+        WAVEDESC['HORIZ_INTERVAL'] = HORIZ_INTERVAL
+        WAVEDESC['HORIZ_OFFSET'] = HORIZ_OFFSET
+        WAVEDESC['PIXEL_OFFSET'] = PIXEL_OFFSET
+        WAVEDESC['VERTUNIT'] = VERTUNIT
+        WAVEDESC['HORUNIT'] = HORUNIT
+        WAVEDESC['HORIZ_UNCERTAINTY'] = HORIZ_UNCERTAINTY
+        WAVEDESC['TRIGGER_TIME'] = (TRIGGER_TIME_SECONDS, TRIGGER_TIME_MINUTES, TRIGGER_TIME_HOURS,
+                                    TRIGGER_TIME_DAYS, TRIGGER_TIME_MONTHS, TRIGGER_TIME_YEAR, TRIGGER_TIME_UNUSED)
+        WAVEDESC['ACQ_DURATION'] = ACQ_DURATION
+        WAVEDESC['RECORD_TYPE_INDEX'] = RECORD_TYPE_INDEX
+        WAVEDESC['RECORD_TYPE'] = RECORD_TYPE
+        WAVEDESC['PROCESSING_DONE_INDEX'] = PROCESSING_DONE_INDEX
+        WAVEDESC['PROCESSING_DONE'] = PROCESSING_DONE
+        WAVEDESC['RESERVED5'] = RESERVED5
+        WAVEDESC['RIS_SWEEPS'] = RIS_SWEEPS
+        WAVEDESC['TIMEBASE_INDEX'] = TIMEBASE_INDEX
+        WAVEDESC['TIMEBASE'] = TIMEBASE
+        WAVEDESC['VERT_COUPLING_INDEX'] = VERT_COUPLING_INDEX
+        WAVEDESC['VERT_COUPLING'] = VERT_COUPLING
+        WAVEDESC['PROBE_ATT'] = PROBE_ATT
+        WAVEDESC['FIXED_VERT_GAIN_INDEX'] = FIXED_VERT_GAIN_INDEX
+        WAVEDESC['FIXED_VERT_GAIN'] = FIXED_VERT_GAIN
+        WAVEDESC['BANDWIDTH_LIMIT_INDEX'] = BANDWIDTH_LIMIT_INDEX
+        WAVEDESC['BANDWIDTH_LIMIT'] = BANDWIDTH_LIMIT
+        WAVEDESC['VERTICAL_VERNIER'] = VERTICAL_VERNIER
+        WAVEDESC['ACQ_VERT_OFFSET'] = ACQ_VERT_OFFSET
+        WAVEDESC['WAVE_SOURCE_INDEX'] = WAVE_SOURCE_INDEX
+        WAVEDESC['WAVE_SOURCE'] = WAVE_SOURCE
+        WAVEDESC['FILE_SIZE'] = fileSize
+
+        # Read user text (160 char. maximum)
+        if USER_TEXT > 0:
+            TEXT = dataFile.read(USER_TEXT)
+        else:
+            TEXT = b''
+
+        # Read waveforms. Distinguish case of acquisition sequence or single acquisition
+        if SUBARRAY_COUNT > 1:
+            # Multiple segments
+            # Sanity check
+            if WAVE_ARRAY_COUNT % SUBARRAY_COUNT != 0:
+                raise RuntimeError('Number of data points is not a multiple of number of segments')
+                return
+            npts = WAVE_ARRAY_COUNT // SUBARRAY_COUNT
+            # Read TRIGTIME array first. There are SUBARRAY_COUNT repetitions of two doubles, TRIGGER_TIME and TRIGGER_OFFSET
+            record_type = np.dtype([('TRIGGER_TIME', co + 'f8'), ('TRIGGER_OFFSET', co + 'f8')])
+            trigArray = np.fromfile(dataFile, dtype=record_type, count=SUBARRAY_COUNT)
+            trigTime = trigArray['TRIGGER_TIME']
+            trigOffset = trigArray['TRIGGER_OFFSET']
+            # Generate trigger time array
+            x = np.zeros((SUBARRAY_COUNT, npts), dtype='float64')
+
+            for i in range(SUBARRAY_COUNT):
+                horOffset = trigTime[i] + trigOffset[i]
+                x[i:] = np.arange(npts, dtype='float64') * HORIZ_INTERVAL + horOffset
+            # Now read data array
+            if COMM_TYPE_INDEX == 0:
+                y1 = np.fromfile(dataFile, dtype=co + 'i1', count=WAVE_ARRAY_COUNT).reshape(
+                    SUBARRAY_COUNT, npts) * VERTICAL_GAIN - VERTICAL_OFFSET
+            else:
+                y1 = np.fromfile(dataFile, dtype=co + 'i2', count=WAVE_ARRAY_COUNT).reshape(
+                    SUBARRAY_COUNT, npts) * VERTICAL_GAIN - VERTICAL_OFFSET
+            y2 = np.array([])
+        else:
+            # Single sweep. Read waveforms from file
+            if COMM_TYPE_INDEX == 0:
+                y1 = np.fromfile(dataFile, dtype=co + 'i1', count=WAVE_ARRAY_COUNT) * \
+                    VERTICAL_GAIN - VERTICAL_OFFSET
+                if WAVE_ARRAY_2 > 0:
+                    y2 = np.fromfile(dataFile, dtype=co + 'i1',
+                                     count=WAVE_ARRAY_COUNT) * VERTICAL_GAIN - VERTICAL_OFFSET
+                else:
+                    y2 = np.array([])
+            else:
+                y1 = np.fromfile(dataFile, dtype=co + 'i2', count=WAVE_ARRAY_COUNT) * \
+                    VERTICAL_GAIN - VERTICAL_OFFSET
+                if WAVE_ARRAY_2 > 0:
+                    y2 = np.fromfile(dataFile, dtype=co + 'i2',
+                                     count=WAVE_ARRAY_COUNT) * VERTICAL_GAIN - VERTICAL_OFFSET
+                else:
+                    y2 = np.array([])
+            # Generate time intervals
+            x = np.arange(WAVE_ARRAY_COUNT, dtype='float64') * HORIZ_INTERVAL + HORIZ_OFFSET
+        return WAVEDESC, TEXT, x, y1, y2
+
+
+# Set up pytables
+class Trace(tables.IsDescription):
+
+    DESCRIPTOR_NAME = tables.StringCol(16)
+    TEMPLATE_NAME = tables.StringCol(16)
+    COMM_TYPE_INDEX = tables.Int16Col()
+    COMM_TYPE = tables.StringCol(16)
+    COMM_ORDER_INDEX = tables.Int16Col()
+    COMM_ORDER = tables.StringCol(16)
+    WAVE_DESCRIPTOR = tables.Int32Col()
+    USER_TEXT = tables.Int32Col()
+    RES_DESC1 = tables.Int32Col()
+    TRIGTIME_ARRAY = tables.Int32Col()
+    RIS_TIME_ARRAY = tables.Int32Col()
+    RES_ARRAY1 = tables.Int32Col()
+    WAVE_ARRAY_1 = tables.Int32Col()
+    WAVE_ARRAY_2 = tables.Int32Col()
+    RES_ARRAY2 = tables.Int32Col()
+    RES_ARRAY3 = tables.Int32Col()
+    INSTRUMENT_NAME = tables.StringCol(16)
+    INSTRUMENT_NUMBER = tables.Int32Col()
+    TRACE_LABEL = tables.StringCol(16)
+    RESERVED1 = tables.Int16Col()
+    RESERVED2 = tables.Int16Col()
+    WAVE_ARRAY_COUNT = tables.Int32Col()
+    PNTS_PER_SCREEN = tables.Int32Col()
+    FIRST_VALID_PNT = tables.Int32Col()
+    LAST_VALID_PNT = tables.Int32Col()
+    FIRST_POINT = tables.Int32Col()
+    SPARSING_FACTOR = tables.Int32Col()
+    SEGMENT_INDEX = tables.Int32Col()
+    SUBARRAY_COUNT = tables.Int32Col()
+    SWEEPS_PER_ACQ = tables.Int32Col()
+    POINTS_PER_PAIR = tables.Int16Col()
+    PAIR_OFFSET = tables.Int16Col()
+    VERTICAL_GAIN = tables.Float32Col()
+    VERTICAL_OFFSET = tables.Float32Col()
+    MAX_VALUE = tables.Float32Col()
+    MIN_VALUE = tables.Float32Col()
+    NOMINAL_BITS = tables.Int16Col()
+    NOM_SUBARRAY_COUNT = tables.Int16Col()
+    HORIZ_INTERVAL = tables.Float32Col()
+    HORIZ_OFFSET = tables.Float64Col()
+    PIXEL_OFFSET = tables.Float64Col()
+    VERTUNIT = tables.StringCol(48)
+    HORUNIT = tables.StringCol(48)
+    HORIZ_UNCERTAINTY = tables.Float32Col()
+    TRIGGER_TIME = tables.Float32Col(7,)
+    ACQ_DURATION = tables.Float32Col()
+    RECORD_TYPE_INDEX = tables.Int16Col()
+    RECORD_TYPE = tables.StringCol(48)
+    PROCESSING_DONE_INDEX = tables.Int16Col()
+    PROCESSING_DONE = tables.StringCol(48)
+    RESERVED5 = tables.Int16Col()
+    RIS_SWEEPS = tables.Int16Col()
+    TIMEBASE_INDEX = tables.Int16Col()
+    TIMEBASE = tables.StringCol(48)
+    VERT_COUPLING_INDEX = tables.Int16Col()
+    VERT_COUPLING = tables.StringCol(48)
+    PROBE_ATT = tables.Float32Col()
+    FIXED_VERT_GAIN_INDEX = tables.Int16Col()
+    FIXED_VERT_GAIN = tables.StringCol(48)
+    BANDWIDTH_LIMIT_INDEX = tables.Int16Col()
+    BANDWIDTH_LIMIT = tables.StringCol(48)
+    VERTICAL_VERNIER = tables.Float32Col()
+    ACQ_VERT_OFFSET = tables.Float32Col()
+    WAVE_SOURCE_INDEX = tables.Int16Col()
+    WAVE_SOURCE = tables.StringCol(16)
+    FILE_SIZE = tables.IntCol()
+
+    # Time can be deduced from the above parameters
+    # times = tables.Float32Col(shape=(10000,))
+    density = tables.Float32Col(shape=(10000,))
+
+
+f_uwave = 288e9
+e = const.elementary_charge
+m_e = const.electron_mass
+eps0 = const.epsilon_0
+c = const.speed_of_light
+
+Npass = 2.0
+# diameter = 0.35  # m
+diameter = 1.0  # m
+calibration = 1. / ((Npass / 4. / np.pi / f_uwave) * (e**2 / m_e / c / eps0))
+
+
+def calc_density(r, s):
+
+    # Construction analytic function versions of the reference and the plasma signal
+    # Note: scipy's hilbert funcdtion actually creates an analytic function using the Hilbert transform, which is what we want in the end anyway
+    # So, given real X(t): analytic functdion = X(t) + i * HX(t), where H is the actual Hilbert transform
+    # https://en.wikipedia.org/wiki/Hilbert_transform
+
+    aref = hilbert(r)
+    asig = hilbert(s)
+    aref -= np.mean(aref)
+    asig -= np.mean(asig)
+
+    pref = np.unwrap(np.angle(aref))
+    psig = np.unwrap(np.angle(asig))
+
+    dphi = (pref - psig)
+    dphi -= dphi[0]
+
+    density = np.unwrap(dphi) * calibration / diameter
+
+    return density
+
+
+# ----- ASSUMES 10 MHz SAMPLING FREQUENCY FOR 1 MS ----- #
+if __name__ == '__main__':
+    fig = plt.figure(figsize=(10,8))
+    canvas = np.zeros((640, 960))
+    screen = pf.screen(canvas, "Line-integrated density")
+    shots_saved = 0
+    while(True):
+        # trace_len = ReadBinaryTrace(file_list[0])[2].shape[0]
+        # Set length of data arrays in table based on first file in list
+        # Trace.time = tables.Float16Col(shape=(trace_len,))
+        # Trace.y1 = tables.Float16Col(shape=(trace_len,))
+
+        time_str = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S.%f")
+
+        h5_file = tables.open_file('F:saved_MSI\\288GHz_inter_2023-02-20_onwards\\' + time_str + '.h5', 'w',
+                                   title="288GHz_Interferometer-" + time_str)
+        h5_group = h5_file.create_group("/", "n_L_288GHz", "288GHz Interferometer")
+        h5_table = h5_file.create_table(h5_group, 'data', Trace, '288 GHz interferometer data')
+        h5_row = h5_table.row
+
+        print("Saving to F:saved_MSI/288GHz_inter_2023-02-20_onwards/" + time_str + ".h5")
+
+        total_shots = 0
+        while(total_shots < 3600):
+            file_list = sorted(glob.glob("F:saved_MSI\\288GHz_inter_2023-02-20_onwards\\C2*.trc"))
+            if file_list:
+                plt.clf()
+                for f in file_list:  # so that this can keep up
+                    try:
+                        signal = ReadBinaryTrace(f)
+                        ref = ReadBinaryTrace(re.sub(r'\\C2', r'\\C1', f))
+                        # print(ref[3], signal[3])
+                        density = calc_density(ref[3], signal[3])
+                        # Downsample to 10,000 data points (original: 10 MHz sampling frequency for 0.1s)
+                        # If sampling at 100 MHz, this will downsample to a 100 kHz sampling rate
+                        density = np.mean(density[:-2].reshape(10000, -1), axis=1)
+                        print("{}: Max n_L: {:0.4}\t min n_L: {:0.4}\t time: {}".format(shots_saved, np.max(density)*0.35, np.min(density)*0.35,
+                            ref[0]['TRIGGER_TIME']))
+                        # times = np.mean(signal[2][:-2].reshape(-1, 100), axis=1)
+                        # h5_row['times'] = times
+                        h5_row['density'] = density
+                        # print(density)
+                        for k in signal[0].keys():
+                            if k == 'TRIGGER_TIME':
+                                h5_row[k] = np.array(signal[0][k])
+                            else:
+                                h5_row[k] = signal[0][k]
+                        h5_row.append()
+                        total_shots += 1
+                        shots_saved += 1
+
+                        # plt.ion()
+                        # plt.show()
+                        plt.title('Line-integrated density at approx {}/{} {}:{}:{:.2f}'.format(
+                            signal[0]['TRIGGER_TIME'][4],
+                            signal[0]['TRIGGER_TIME'][3],
+                            signal[0]['TRIGGER_TIME'][2],
+                            signal[0]['TRIGGER_TIME'][1],
+                            signal[0]['TRIGGER_TIME'][0]))
+                        plt.ylabel('Line-integrated density ($m^{-2}$)')
+                        plt.xlabel('Time (ms)')
+                        offset = ref[0]['HORIZ_OFFSET']
+                        # ref[3].shape[0] // 10000 makes sure that when downsampled, the timing is preserved
+                        # Multiply by 1000 to get the time in ms instead of s
+                        timebase = ref[0]['HORIZ_INTERVAL'] * (ref[3].shape[0] // 10000)
+                        time_axis = (np.arange(10000) * timebase + offset) * 1000
+                        plt.plot(time_axis, density - np.mean(density[-100:]), color=[1.0, 0.0, 0.0, 0.3])  # more like BGR
+                        plt.tight_layout()
+                        fig.canvas.draw()
+                        image = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                        image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+                        screen.update(image)
+                        # plt.draw()
+                        # plt.pause(0.001)
+
+
+                    except Exception as e:
+                        print(e)
+                    # print("+", end="")
+                # print(" +{} ".format(len(file_list)), end="")
+                h5_table.flush()
+                for f in file_list:
+                    try:
+                        os.remove(f)  # Remove channel 2
+                        os.remove(os.path.normpath(re.sub(r'\\C2', r'\\C1', f)))  # Remove channel 1
+                    except Exception as e:
+                        print(e)
+                # print(" ({}) ".format(total_shots))
+                file_list = []
+
+            else:
+                print(".", end="")
+            time.sleep(10) # sleep before trying again
+        h5_file.close()
