@@ -10,6 +10,7 @@ import tables
 import mysql.connector
 import re
 import datetime
+import pickle
 
 from LVBF_buff import LV_fd
 
@@ -55,6 +56,9 @@ def receive_data_spec(q_spec, HOST, PORT):
 
                 while True:
                     # Get data size
+                    # print('getting spec data')
+                    trigger_value = struct.unpack(">i", s.recv(4))[0]
+                    integration_time = struct.unpack(">i", s.recv(4))[0]
                     data_length = struct.unpack(">i", s.recv(4))[0]
 
                     data = b''
@@ -66,8 +70,10 @@ def receive_data_spec(q_spec, HOST, PORT):
                         data += part
                         data_remaining -= len(part)
 
-                    spec_data = np.frombuffer(data, dtype=np.float).reshape(2, -1)
-                    q_spec.put(spec_data)
+                    if data != b'':
+                        spec_data = np.frombuffer(data, dtype=np.float).reshape(2, -1)
+                        # print('adding spec data to queue')
+                        q_spec.put((trigger_value, integration_time, spec_data))
         except Exception as e:
             print("Spectrometer client exception: ")
             print(repr(e))
@@ -81,10 +87,10 @@ class Discharge(tables.IsDescription):
     north_discharge_current = tables.Float32Col(shape=(4096,))
     north_discharge_voltage = tables.Float32Col(shape=(4096,))
 
-    interferometer_signals = tables.Float64Col(shape=(1, 4096))
-    interferometer_t0_seconds = tables.Int64Col(shape=(1,))
-    interferometer_t0_fraction = tables.UInt64Col(shape=(1,))
-    interferometer_dt = tables.Float64Col(shape=(1,))
+    interferometer_signals = tables.Float64Col(shape=(2, 4096))
+    interferometer_t0_seconds = tables.Int64Col(shape=(2,))
+    interferometer_t0_fraction = tables.UInt64Col(shape=(2,))
+    interferometer_dt = tables.Float64Col(shape=(2,))
 
     diode_signals = tables.Float64Col(shape=(3, 4096))
     diode_t0_seconds = tables.Int64Col(3,)
@@ -118,10 +124,12 @@ class Discharge(tables.IsDescription):
 
     internal_shotnum = tables.Int32Col()
 
+    spectrometer_trigger = tables.Int32Col()
+    spectrometer_int_t = tables.Int32Col()
     spectrometer = tables.Float64Col(shape=(2, 3648))
 
 
-def save_data(q, q_spec, path="saved_MSI/"):
+def save_data(q, q_spec, q_multi, path="E:/saved_MSI/"):
     temp_data = {}
     shotnum = -1
     norun_shotnum = -1
@@ -146,70 +154,85 @@ def save_data(q, q_spec, path="saved_MSI/"):
     #   save the info to a h5 file
     while True:
         shotnum += 1
+        print("Shot {}: ".format(shotnum), end="", flush=True)
         # print("Queue size: {}.".format(q.qsize()), end=' ')
 
         # We want this to be a blocking call -- no discharge information = no plasma
         buffer = q.get(block=True, timeout=None)
         reader = LV_fd(endian='>', encoding='cp1252')
+        print("(msi) ", end="", flush=True)
 
         reader.fobj = buffer
-        while reader.offset < len(buffer):
-            temp_data['discharge_current'] = (reader.read_array(reader.read_numeric, d='>f4'))
-            temp_data['discharge_voltage'] = (reader.read_array(reader.read_numeric, d='>f4'))
-
-            temp_data['north_discharge_current'] = (reader.read_array(reader.read_numeric, d='>f4'))
-            temp_data['north_discharge_voltage'] = (reader.read_array(reader.read_numeric, d='>f4'))
-
-            temp_data['interferometer_signals'] = (reader.read_array(reader.read_numeric, d='>f8', ndims=2))
-            inter_t0 = (reader.read_array(reader.read_timestamp))
-            temp_data['interferometer_t0_seconds'] = np.array([inter_t0[i][0] for i in range(inter_t0.shape[0])], dtype=np.int64)
-            temp_data['interferometer_t0_fraction'] = np.array([inter_t0[i][1] for i in range(inter_t0.shape[0])], dtype=np.uint64)
-            temp_data['interferometer_dt'] = (reader.read_array(reader.read_numeric, d='>f8'))
-
-            temp_data['diode_signals'] = (reader.read_array(reader.read_numeric, d='>f8', ndims=2))
-            diode_t0 = (reader.read_array(reader.read_timestamp))
-            temp_data['diode_t0_seconds'] = np.array([diode_t0[i][0] for i in range(diode_t0.shape[0])], dtype=np.int64)
-            temp_data['diode_t0_fraction'] = np.array([diode_t0[i][1] for i in range(diode_t0.shape[0])], dtype=np.uint64)
-            temp_data['diode_dt'] = (reader.read_array(reader.read_numeric, d='>f8'))
-
-            temp_data['datarun_timeout'] = (reader.read_boolean())
-            temp_data['datarun_key'] = (reader.read_string())[0]
-            temp_data['datarun_shotnum'] = (reader.read_numeric(d='>u4'))
-            temp_data['datarun_status'] = (reader.read_numeric(d='>u2'))
-            temp_data['datarun_timestamp'] = (reader.read_numeric(d='>f8'))
-
-            temp_data['MSI_timeout'] = (reader.read_boolean())
-            temp_data['MSI_timestamp'] = (reader.read_numeric(d='>f8'))
-
-            temp_data['heater_valid'] = (reader.read_boolean())
-            temp_data['heater_current'] = (reader.read_numeric(d='>f4'))
-            temp_data['heater_voltage'] = (reader.read_numeric(d='>f4'))
-            temp_data['heater_temp'] = (reader.read_numeric(d='>f4'))
-
-            temp_data['pressure_valid'] = (reader.read_boolean())
-            temp_data['RGA_valid'] = (reader.read_boolean())
-            temp_data['pressure_fill'] = (reader.read_numeric(d='>f4'))
-            temp_data['RGA_peak'] = (reader.read_numeric(d='>f4'))
-            temp_data['RGA_partials'] = (reader.read_array(reader.read_numeric, d='>f4'))
-
-            temp_data['magnet_valid'] = (reader.read_boolean())
-            temp_data['magnet_profile'] = (reader.read_array(reader.read_numeric, d='>f4'))
-            temp_data['magnet_supplies'] = (reader.read_array(reader.read_numeric, d='>f4'))
-            temp_data['magnet_peak'] = (reader.read_numeric(d='>f4'))
-
-            temp_data["internal_shotnum"] = shotnum
-
-        # Wait at most 0.2 seconds
         try:
-            spec_data = q_spec.get(block=True, timeout=0.2)
-            # Make sure we get the most recent spectrometer information in case there is a hangup
-            # Might want to check if this is actually a problem first.
-            # while q_spec.empty() is False:
-            #     spec_data = q_spec.get(block=True, timeout=0.2)
-            temp_data['spectrometer'] = spec_data
-        except queue.Empty:
-            print("Spectrometer offline")
-            temp_data['spectrometer'] = np.zeros((2, 3648), dtype=np.float)
+            while reader.offset < len(buffer):
+                temp_data['discharge_current'] = (reader.read_array(reader.read_numeric, d='>f4'))
+                temp_data['discharge_voltage'] = (reader.read_array(reader.read_numeric, d='>f4'))
+
+                temp_data['north_discharge_current'] = (reader.read_array(reader.read_numeric, d='>f4'))
+                temp_data['north_discharge_voltage'] = (reader.read_array(reader.read_numeric, d='>f4'))
+
+                temp_data['interferometer_signals'] = (reader.read_array(reader.read_numeric, d='>f8', ndims=2))
+                inter_t0 = (reader.read_array(reader.read_timestamp))
+                temp_data['interferometer_t0_seconds'] = np.array([inter_t0[i][0] for i in range(inter_t0.shape[0])], dtype=np.int64)
+                temp_data['interferometer_t0_fraction'] = np.array([inter_t0[i][1] for i in range(inter_t0.shape[0])], dtype=np.uint64)
+                temp_data['interferometer_dt'] = (reader.read_array(reader.read_numeric, d='>f8'))
+
+                temp_data['diode_signals'] = (reader.read_array(reader.read_numeric, d='>f8', ndims=2))
+                diode_t0 = (reader.read_array(reader.read_timestamp))
+                temp_data['diode_t0_seconds'] = np.array([diode_t0[i][0] for i in range(diode_t0.shape[0])], dtype=np.int64)
+                temp_data['diode_t0_fraction'] = np.array([diode_t0[i][1] for i in range(diode_t0.shape[0])], dtype=np.uint64)
+                temp_data['diode_dt'] = (reader.read_array(reader.read_numeric, d='>f8'))
+
+                temp_data['datarun_timeout'] = (reader.read_boolean())
+                try:
+                    temp_data['datarun_key'] = (reader.read_string())[0]
+                except AttributeError as e:  # Labview needs to be modified to catch this (the indicator is updated, but not the data sent)
+                    print('datarun_key error: ' + str(e) + ". ", end="")
+                    temp_data['datarun_key'] = 'no-run'
+                temp_data['datarun_shotnum'] = (reader.read_numeric(d='>u4'))
+                temp_data['datarun_status'] = (reader.read_numeric(d='>u2'))
+                temp_data['datarun_timestamp'] = (reader.read_numeric(d='>f8'))
+
+                temp_data['MSI_timeout'] = (reader.read_boolean())
+                temp_data['MSI_timestamp'] = (reader.read_numeric(d='>f8'))
+
+                temp_data['heater_valid'] = (reader.read_boolean())
+                temp_data['heater_current'] = (reader.read_numeric(d='>f4'))
+                temp_data['heater_voltage'] = (reader.read_numeric(d='>f4'))
+                temp_data['heater_temp'] = (reader.read_numeric(d='>f4'))
+
+                temp_data['pressure_valid'] = (reader.read_boolean())
+                temp_data['RGA_valid'] = (reader.read_boolean())
+                temp_data['pressure_fill'] = (reader.read_numeric(d='>f4'))
+                temp_data['RGA_peak'] = (reader.read_numeric(d='>f4'))
+                temp_data['RGA_partials'] = (reader.read_array(reader.read_numeric, d='>f4'))
+
+                temp_data['magnet_valid'] = (reader.read_boolean())
+                temp_data['magnet_profile'] = (reader.read_array(reader.read_numeric, d='>f4'))
+                temp_data['magnet_supplies'] = (reader.read_array(reader.read_numeric, d='>f4'))
+                temp_data['magnet_peak'] = (reader.read_numeric(d='>f4'))
+
+                temp_data["internal_shotnum"] = shotnum
+        except Exception as e:
+            print(e)
+            continue
+        finally:
+            try:
+                # Wait at most 0.2 seconds
+                trigger_value, integration_time, spec_data = q_spec.get(block=True, timeout=0.2)
+                # Make sure we get the most recent spectrometer information in case there is a hangup
+                # Might want to check if this is actually a problem first.
+                while q_spec.empty() is False:
+                    trigger_value, integration_time, spec_data_temp = q_spec.get(block=True, timeout=0.2)
+                    spec_data[1, :] += spec_data_temp[1, :]
+                temp_data['spectrometer_trigger'] = trigger_value
+                temp_data['spectrometer_int_t'] = integration_time
+                temp_data['spectrometer'] = spec_data
+                # print(spec_data)
+                print("(spec) ", end="", flush=True)
+            except queue.Empty:
+                print("Spectrometer offline")
+                temp_data['spectrometer'] = np.zeros((2, 3648), dtype=np.float)
 
         # Switch files if the datarun changed.
         if curr_datarun != temp_data['datarun_key']:
@@ -251,23 +274,37 @@ def save_data(q, q_spec, path="saved_MSI/"):
             #     run_group = run_h5file.MSI
             run_shot = run_table.row
 
+        # Put multicast in here
+        q_multi.put(temp_data)
+
         # Save to separate file if datarun timed out, else save to datarun file.
         if temp_data['datarun_timeout'] == 1:
             norun_shotnum += 1
             for key in temp_data:
-                norun_shot[key] = temp_data[key]
+                try:
+                    norun_shot[key] = temp_data[key]
+                except KeyError as e:  # in case we added new diagnostics between dataruns
+                    print("Key error: " + str(e) + ". Continuing without. Key: ", end="")
+                    print(key)
+                except ValueError as e:  # this sometimes happens when switching to a datarun file
+                    print("Value error: " + str(e) + ". Attempting to continue... Key: ", end="")
+                    print(key)
             norun_shot.append()
             norun_table.flush()
-            print("Saved: shot {} in {}. ".format(shotnum, time_str), end="")
+            print("saved in {}. ".format(time_str), end="")
         else:
             for key in temp_data:
                 try:
                     run_shot[key] = temp_data[key]
-                except KeyError as e:
-                    print("Key error: " + str(e) + ". Continuing without.")
+                except KeyError as e:  # in case we added new diagnostics between dataruns
+                    print("Key error: " + str(e) + ". Continuing without. Key: ", end="")
+                    print(key)
+                except ValueError as e:  # this sometimes happens when switching to a datarun file
+                    print("Value error: " + str(e) + ". Attempting to continue... Key: ", end="")
+                    print(key)
             run_shot.append()
             run_table.flush()
-            print("Saved: shot {} in ".format(shotnum) + filename + ". ", end="")
+            print("saved in " + filename + ". ", end="")
 
         # This magic number controls how many shots are in one file when there isn't a datarun.
         # 16383 is roughly 1/5th a day. 172800 is roughly two days
@@ -289,11 +326,26 @@ def save_data(q, q_spec, path="saved_MSI/"):
         ts_datarun = datetime.datetime.fromtimestamp(int(temp_data['datarun_timestamp']))
         ts_datarun_frac = np.modf(temp_data['datarun_timestamp'])[0]
         if temp_data['datarun_timeout'] == 1:
-            print("MSI time: {}+{:0.4}".format(ts_sec, ts_frac))
+            print("MSI time: {}+{:0.4}".format(ts_sec, ts_frac), flush=True)
         else:
             print("Datarun shot: {}. Time: {}.{:0.4}. "
                   "MSI time: {}+{:0.4}".format(temp_data['datarun_shotnum'], ts_datarun,
-                                           ts_datarun_frac, ts_sec, ts_frac))
+                                           ts_datarun_frac, ts_sec, ts_frac), flush=True)
+
+
+def send_data_multicast(q, group, port):
+    MULTICAST_TTL = 2
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, MULTICAST_TTL)
+
+    while True:
+        data_send = q.get()
+        bytes_send = pickle.dumps(data_send)
+        sock.sendto(struct.pack(">i", len(bytes_send)), (group, port))
+        i = 0
+        while (i * 65507) < len(bytes_send):
+            sock.sendto(bytes_send[i * 65507: (i + 1) * 65507], (group, port))
+            i += 1
 
 
 if __name__ == '__main__':
@@ -304,19 +356,28 @@ if __name__ == '__main__':
     HOST_spec = '192.168.7.91'
     PORT_spec = 5004
 
-    savepath = "saved_MSI/"
+    # Multicast group settings 
+    # '224.0.0.36'
+    MCAST_GRP = '224.1.1.1'
+    MCAST_PORT = 10004
+
+    savepath = "F:/saved_MSI/2023-1-06_onwards/"
+    # savepath = "C:/Users/daq/Desktop/temp_saves/saved_msi/"
 
     q = mp.Queue()
     q_spec = mp.Queue()
+    q_multi = mp.Queue()
     # p_read, p_write = mp.Pipe(duplex=False)
 
     tcp_process = mp.Process(target=receive_data, args=(q, HOST, PORT))
     tcp_process_spec = mp.Process(target=receive_data_spec, args=(q_spec, HOST_spec, PORT_spec))
-    save_process = mp.Process(target=save_data, args=(q, q_spec, savepath))
+    save_process = mp.Process(target=save_data, args=(q, q_spec, q_multi, savepath))
+    multicast_process = mp.Process(target=send_data_multicast, args=(q_multi, MCAST_GRP, MCAST_PORT))
 
     tcp_process.start()
     tcp_process_spec.start()
     save_process.start()
+    multicast_process.start()
 
     try:
         while True:
@@ -329,6 +390,9 @@ if __name__ == '__main__':
         tcp_process_spec.terminate()
         tcp_process_spec.join()
         save_process.join()
+        multicast_process.terminate()
+        multicast_process.join()
         tcp_process.close()
         tcp_process_spec.close()
         save_process.close()
+        multicast_process.close()
