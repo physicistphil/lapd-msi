@@ -1,16 +1,45 @@
 import time
 import socket
 import struct
-import io
 import multiprocessing as mp
-import queue
 import numpy as np
 import datetime
 import tables
-import mysql.connector
-import re
 import datetime
 import pickle
+from pyphantom import Phantom, utils, cine
+
+
+# Shots to save using the FFC. Do not choose shots immediately after probe movements!
+# e.g., if you're taking 10 shots per position, then do not select shot 1, 11, or 21 etc..
+#   because that would cause many cines to be taken for the specific shot (limitation of 
+#   the datarun sequencer). The camera needs to set the proper settings before the shot
+#   is taken.
+FFC_shot_list = []
+shots_per_position = 10  # please set to the proper value!
+base_save_path = ""  # change to some place with a lot of storage
+
+
+def record_cine(cam):
+    print("Recording... ", end='\r')
+    # Clear all cines before recording
+    cam.record(cine=1, delete_all=True)
+    while(cam.partition_recorded(1) is False):
+        print("Recording... waiting for cine  ", end='\r')
+        time.sleep(0.1)  # sleep for 100 ms until a cine is recorded
+    print("Recording... done   \t\t\t\t")
+
+
+def save_cine(cam, frame_range, filename):
+    rec_cine = cine.Cine.from_camera(cam, 1)
+    rec_cine.save_range = frame_range
+    rec_cine.save_non_blocking(filename=filename)
+
+    while (rec_cine.save_percentage < 100):
+        print("Saving {}%   ".format(rec_cine.save_percentage), end='\r')
+        time.sleep(0.1)
+    print("Saving -- done")
+    rec_cine.close()
 
 
 def receive_data(q, MCAST_GRP, MCAST_PORT):
@@ -61,6 +90,70 @@ def print_msi_info(q):
                                            ts_datarun_frac, ts_sec, ts_frac), flush=True)
 
 
+def record_FFC_footage(q):
+    ph = Phantom()
+    cam_count = ph.camera_count
+    if cam_count == 0:
+        print("No camera discovered; closing.")
+        ph.close()
+        quit()
+
+    # Assumes only one camera on the network
+    cam = ph.Camera(0)
+
+    while True:
+        msi = pickle.loads(q.get())
+        datarun_shotnum = msi['datarun_shotnum']
+        ts_sec = datetime.datetime.fromtimestamp(msi['diode_t0_seconds'][0])
+        ts_frac = msi['diode_t0_fraction'][0].astype('u8') / 2 ** 64
+        msi_time_string = "{}+{:0.4}".format(ts_sec, ts_frac)
+
+        # If datarun is ongoing and the datarun shotnumber is right before one we want:
+        if msi['datarun_timeout'] is False and (datarun_shotnum + 1) in FFC_shot_list:
+            cine_folder = base_save_path + 'cines/' + msi['datarun_key']
+            filename = 'shot-' + f'{datarun_shotnum:05}' + '_msi-' + msi_time_string
+
+            print("Recording large cine, saving to " + cine_folder + '/' + filename, flush=True)
+            # Set camera settings
+            cam.resolution = (256, 256)
+            cam.exposure = 14  # microseconds, I ssume
+            cam.edr_exposure = 0
+            cam.frame_rate = 35000
+            cam.post_trigger_frames = 2000  # Save range *must* be less than this or else it will save the entire cine!
+            print("Set large cine parameters")
+
+            record_cine(cam)
+            save_cine(cam, utils.FrameRange(-300, 1600), cine_folder + '/' + filename)
+        elif msi['datarun_timeout'] is False and (datarun_shotnum + 1) % shots_per_position == 2:
+            cine_folder = base_save_path + 'cines/small/' + msi['datarun_key']
+            filename = 'shot-' + f'{datarun_shotnum:05}' + '_msi-' + msi_time_string
+
+            print("Recording large cine, saving to " + cine_folder + '/' + filename, flush=True)
+            # Set camera settings
+            cam.resolution = (256, 256)
+            cam.exposure = 14  # microseconds, I ssume
+            cam.edr_exposure = 0
+            cam.frame_rate = 2500
+            cam.post_trigger_frames = 200  # Save range *must* be less than this or else it will save the entire cine!
+            print("Set large cine parameters")
+
+            record_cine(cam)
+            save_cine(cam, utils.FrameRange(-30, 160), cine_folder + '/' + filename)
+        else:
+            ts_datarun = datetime.datetime.fromtimestamp(int(msi['datarun_timestamp']))
+            ts_datarun_frac = np.modf(msi['datarun_timestamp'])[0]
+            if msi['datarun_timeout'] == 1:
+                print("MSI time: {}+{:0.4}".format(ts_sec, ts_frac), flush=True)
+            else:
+                print("Datarun shot: {}. Time: {}.{:0.4}. "
+                      "MSI time: {}+{:0.4}".format(msi['datarun_shotnum'], ts_datarun,
+                                                   ts_datarun_frac, ts_sec, ts_frac), flush=True)
+
+    cam.close()
+    ph.close()
+    print("Done")
+
+
         # Count number of shots
         # If datarun, save every X amount
 
@@ -76,8 +169,8 @@ if __name__ == '__main__':
     multicast_process = mp.Process(target=receive_data, args=(q, MCAST_GRP, MCAST_PORT))
     multicast_process.start()
 
-    print_process = mp.Process(target=print_msi_info, args=(q,))
-    print_process.start()
+    ffc_process = mp.Process(target=record_FFC_footage, args=(q,))
+    ffc_process.start()
 
     try:
         while True:
@@ -87,7 +180,7 @@ if __name__ == '__main__':
     finally:
         multicast_process.terminate()
         multicast_process.join()
-        print_process.terminate()
-        print_process.join()
+        ffc_process.terminate()
+        ffc_process.join()
         multicast_process.close()
-        print_process.close()
+        ffc_process.close()
