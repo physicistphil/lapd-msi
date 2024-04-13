@@ -17,35 +17,40 @@ from LVBF_buff import LV_fd
 
 # Receive data from the MSI system / old housekeeping labview program
 def receive_data(q, HOST, PORT):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((HOST, PORT))
 
-        # This response-request paradigm is unncessary -- this and the labview code needs to
-        #   be edited. It's this way because I didn't quite know what I was doing when I first wrote
-        #   it and I was compensating for lost info (but it was because I just didn't check how
-        #   long the received data actually was and assumed it was 1024)
-        while True:
-            # Size request
-            s.sendall(struct.pack(">i", 1))
-            # Wait for response
-            data_length = struct.unpack(">i", s.recv(4))[0]
+                # This response-request paradigm is unncessary -- this and the labview code needs to
+                #   be edited. It's this way because I didn't quite know what I was doing when I first wrote
+                #   it and I was compensating for lost info (but it was because I just didn't check how
+                #   long the received data actually was and assumed it was 1024)
+                while True:
+                    # Size request
+                    s.sendall(struct.pack(">i", 1))
+                    # Wait for response
+                    data_length = struct.unpack(">i", s.recv(4))[0]
 
-            data = b''
-            data_remaining = data_length
+                    data = b''
+                    data_remaining = data_length
 
-            # print("Data request")
-            BUFF_LEN = 1024
-            while data_remaining > 0:
-                # print(data_remaining)
-                s.sendall(struct.pack(">i", 2))
-                part = s.recv(BUFF_LEN if data_remaining > BUFF_LEN else data_remaining)
-                data += part
-                data_remaining -= len(part)
-                # print(data_remaining)
-            # print("Data received. Length: {}".format(len(data)))
+                    # print("Data request")
+                    BUFF_LEN = 1024
+                    while data_remaining > 0:
+                        # print(data_remaining)
+                        s.sendall(struct.pack(">i", 2))
+                        part = s.recv(BUFF_LEN if data_remaining > BUFF_LEN else data_remaining)
+                        data += part
+                        data_remaining -= len(part)
+                        # print(data_remaining)
+                    # print("Data received. Length: {}".format(len(data)))
 
-            q.put(data)
-
+                    q.put(data)
+        except:
+            print("Could not connect to Read_DID.vi " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\t\t", end='\r')
+            time.sleep(1)
+   
 
 # Receive data from the spectrometer server
 def receive_data_spec(q_spec, HOST, PORT):
@@ -71,7 +76,7 @@ def receive_data_spec(q_spec, HOST, PORT):
                         data_remaining -= len(part)
 
                     if data != b'':
-                        spec_data = np.frombuffer(data, dtype=np.float).reshape(2, -1)
+                        spec_data = np.frombuffer(data, dtype=float).reshape(2, -1)
                         # print('adding spec data to queue')
                         q_spec.put((trigger_value, integration_time, spec_data))
         except Exception as e:
@@ -232,7 +237,7 @@ def save_data(q, q_spec, q_multi, path="E:/saved_MSI/"):
                 print("(spec) ", end="", flush=True)
             except queue.Empty:
                 print("Spectrometer offline")
-                temp_data['spectrometer'] = np.zeros((2, 3648), dtype=np.float)
+                temp_data['spectrometer'] = np.zeros((2, 3648), dtype=float)
 
         # Switch files if the datarun changed.
         if curr_datarun != temp_data['datarun_key']:
@@ -350,7 +355,7 @@ def send_data_multicast(q, group, port):
 
 if __name__ == '__main__':
     # Old housekeeping computer / connection to get MSI
-    HOST = '192.168.7.54'
+    HOST = '192.168.7.3'
     PORT = 27182
     # Raspberry pi that has the spectrometer attached (and digitizers eventually)
     HOST_spec = '192.168.7.91'
@@ -361,7 +366,7 @@ if __name__ == '__main__':
     MCAST_GRP = '224.1.1.1'
     MCAST_PORT = 10004
 
-    savepath = "F:/saved_MSI/2023-1-06_onwards/"
+    savepath = "G:/saved_MSI/2023-1-06_onwards/"
     # savepath = "C:/Users/daq/Desktop/temp_saves/saved_msi/"
 
     q = mp.Queue()
