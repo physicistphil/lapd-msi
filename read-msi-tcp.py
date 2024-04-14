@@ -85,6 +85,35 @@ def receive_data_spec(q_spec, HOST, PORT):
             time.sleep(0.5)
 
 
+# Receive data from the gas puff flow meters
+def receive_data_flowmeters(q_flow, HOST, PORT):
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((HOST, PORT))
+
+                while True:
+                    data_length = struct.unpack(">i", s.recv(4))[0]
+
+                    data = b''
+                    data_remaining = data_length
+
+                    BUFF_LEN = 1024
+                    while data_remaining > 0:
+                        part = s.recv(BUFF_LEN if data_remaining > BUFF_LEN else data_remaining)
+                        data += part
+                        data_remaining -= len(part)
+
+                    if data != b'':
+                        flow_data = np.frombuffer(data, dtype=np.float32).reshape(2, -1)
+                        # print('adding spec data to queue')
+                        q_flow.put(flow_data)
+        except Exception as e:
+            print("Flow meter client exception: ")
+            print(repr(e))
+            time.sleep(0.5)
+
+
 class Discharge(tables.IsDescription):
     discharge_current = tables.Float32Col(shape=(4096,))
     discharge_voltage = tables.Float32Col(shape=(4096,))
@@ -133,8 +162,10 @@ class Discharge(tables.IsDescription):
     spectrometer_int_t = tables.Int32Col()
     spectrometer = tables.Float64Col(shape=(2, 3648))
 
+    flowmeter = tables.Float32Col(shape=(2, 180))
 
-def save_data(q, q_spec, q_multi, path="E:/saved_MSI/"):
+
+def save_data(q, q_spec, q_multi, q_flow, path="E:/saved_MSI/"):
     temp_data = {}
     shotnum = -1
     norun_shotnum = -1
@@ -229,7 +260,7 @@ def save_data(q, q_spec, q_multi, path="E:/saved_MSI/"):
                 # Might want to check if this is actually a problem first.
                 while q_spec.empty() is False:
                     trigger_value, integration_time, spec_data_temp = q_spec.get(block=True, timeout=0.2)
-                    spec_data[1, :] += spec_data_temp[1, :]
+                    spec_data[1, :] += spec_data_temp[1, :]  # WTF? no idea what's going on here.
                 temp_data['spectrometer_trigger'] = trigger_value
                 temp_data['spectrometer_int_t'] = integration_time
                 temp_data['spectrometer'] = spec_data
@@ -238,6 +269,15 @@ def save_data(q, q_spec, q_multi, path="E:/saved_MSI/"):
             except queue.Empty:
                 print("Spectrometer offline")
                 temp_data['spectrometer'] = np.zeros((2, 3648), dtype=float)
+
+            # Wait 0.1 seconds (this is in addition to the 0.2 spectrometer timeout, so 0.3 total)
+            flow_data = -1 * np.ones((2, 180), dtype=np.float32)
+            if q_flow.empty():
+                print("Flow meters offline")
+            while q_flow.empty() is False:
+                flow_data = q_flow.get(block=True, timeout=0.1)
+                print("(flow) ", end="", flush=True)
+            temp_data['flowmeter'] = flow_data
 
         # Switch files if the datarun changed.
         if curr_datarun != temp_data['datarun_key']:
@@ -335,7 +375,7 @@ def save_data(q, q_spec, q_multi, path="E:/saved_MSI/"):
         else:
             print("Datarun shot: {}. Time: {}.{:0.4}. "
                   "MSI time: {}+{:0.4}".format(temp_data['datarun_shotnum'], ts_datarun,
-                                           ts_datarun_frac, ts_sec, ts_frac), flush=True)
+                                               ts_datarun_frac, ts_sec, ts_frac), flush=True)
 
 
 def send_data_multicast(q, group, port):
@@ -360,8 +400,11 @@ if __name__ == '__main__':
     # Raspberry pi that has the spectrometer attached (and digitizers eventually)
     HOST_spec = '192.168.7.91'
     PORT_spec = 5004
+    # Raspberry pi that has the flowmeters attached
+    HOST_flow = '192.168.7.38'
+    PORT_flow = 5008
 
-    # Multicast group settings 
+    # Multicast group settings
     # '224.0.0.36'
     MCAST_GRP = '224.1.1.1'
     MCAST_PORT = 10004
@@ -372,17 +415,20 @@ if __name__ == '__main__':
     q = mp.Queue()
     q_spec = mp.Queue()
     q_multi = mp.Queue()
+    q_flow = mp.Queue()
     # p_read, p_write = mp.Pipe(duplex=False)
 
     tcp_process = mp.Process(target=receive_data, args=(q, HOST, PORT))
     tcp_process_spec = mp.Process(target=receive_data_spec, args=(q_spec, HOST_spec, PORT_spec))
-    save_process = mp.Process(target=save_data, args=(q, q_spec, q_multi, savepath))
+    save_process = mp.Process(target=save_data, args=(q, q_spec, q_multi, q_flow, savepath))
     multicast_process = mp.Process(target=send_data_multicast, args=(q_multi, MCAST_GRP, MCAST_PORT))
+    flow_process = mp.Process(target=receive_data_flowmeters, args=(q_flow, HOST_flow, PORT_flow))
 
     tcp_process.start()
     tcp_process_spec.start()
     save_process.start()
     multicast_process.start()
+    flow_process.start()
 
     try:
         while True:
@@ -397,7 +443,11 @@ if __name__ == '__main__':
         save_process.join()
         multicast_process.terminate()
         multicast_process.join()
+        flow_process.terminate()
+        flow_process.join()
+
         tcp_process.close()
         tcp_process_spec.close()
         save_process.close()
         multicast_process.close()
+        flow_process.close()
