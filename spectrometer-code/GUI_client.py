@@ -59,7 +59,7 @@ def data_client_process(pipe, data_queue):
                     part = sock.recv(BUFF_LEN if data_remaining > BUFF_LEN else data_remaining)
                     data += part
                     data_remaining -= len(part)
-                spec_data = np.frombuffer(data, dtype=np.float).reshape(2, -1)
+                spec_data = np.frombuffer(data, dtype=np.float64).reshape(2, -1)
                 data_queue.put((trigger, integration_time, spec_data))
 
                 if pipe.poll() is True:
@@ -290,6 +290,9 @@ class SpecApp(tk.Frame, SendSettings, ReceiveSpecData):
         self.ax = self.fig.add_subplot(111)
         self.ax.set_xlabel("Wavelengths")
         self.ax.set_ylabel("Intensities")
+        self.ax.set_xlim(275, 775)
+        self.ax.set_ylim(2.5e2, 2e4)
+        self.ax.set_yscale('log')
         # self.ax.set_title("Spectrum")
         self.ax.set_title("Spectrum ({} shot avg) -- trigger: {}, integration: {} $\\mu$s".format(0, 0, 0))
         self.canvas = FigureCanvasTkAgg(self.fig, master=temp)
@@ -316,10 +319,6 @@ class SpecApp(tk.Frame, SendSettings, ReceiveSpecData):
                 num_shots = num_shots if num_shots <= self.data_array.shape[0] else self.data_array.shape[0]
                 avg_spectrum = np.mean(self.data_array[-num_shots:], axis=0)
 
-                self.ax.set_xlim(avg_spectrum[0].min() - avg_spectrum[0].max() * 0.03,
-                                 avg_spectrum[0].max() * 1.03 )
-                self.ax.set_ylim(avg_spectrum[1].min() - avg_spectrum[1].max() * 0.05,
-                                 avg_spectrum[1].max() * 1.05)
                 self.lines.set_xdata(avg_spectrum[0])
                 self.lines.set_ydata(avg_spectrum[1])
                 # plt.draw()
