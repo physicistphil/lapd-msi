@@ -22,7 +22,8 @@ try:
     while True:
         # Sending data
         s.send_settings()
-        client_port = 5005 # s.get_port()
+        client_port = s.get_port()
+        # client_port = 5005
 
         s.send_zero_bytes()
         r.create_socket()
@@ -33,7 +34,9 @@ try:
         r.receive_data()
         spec = r.prepare_data()
         spec_list.append(spec)
+        print(spec)
 
 finally:
-    sd.save_data(spec)
+    # sd.save_data(spec)
+
     print("done")

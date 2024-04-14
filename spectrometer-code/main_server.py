@@ -2,7 +2,7 @@ from server import SendSpecData, ReceiveSettings
 import json
 
 # Server class parameters
-ip = '192.168.7.91'
+ip = '127.0.0.1'
 port = 5004
 server_address = (ip, port)
 ttl = 2
@@ -12,7 +12,7 @@ chunk_size = 500
 s = SendSpecData(chunk_size, server_address, ttl)
 r = ReceiveSettings()
 while True:
-    
+
     # Setting up address and socket, which is then set to receive
     r.set_server_address(server_address)
     r.set_sock()
@@ -34,7 +34,5 @@ while True:
     s.setup_spec(trig_val, int_time_micros)
     s.set_socket_send()
     s.get_data()
-
-    # client_address=(client_address[0], 5005)
 
     s.send_data(client_address)
