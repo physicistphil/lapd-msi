@@ -94,7 +94,6 @@ def receive_data_flowmeters(q_flow, HOST, PORT):
 
                 while True:
                     data_length = struct.unpack(">i", s.recv(4))[0]
-
                     data = b''
                     data_remaining = data_length
 
@@ -267,13 +266,13 @@ def save_data(q, q_spec, q_multi, q_flow, path="E:/saved_MSI/"):
                 # print(spec_data)
                 print("(spec) ", end="", flush=True)
             except queue.Empty:
-                print("Spectrometer offline")
+                print("Spectrometer offline ", end='')
                 temp_data['spectrometer'] = np.zeros((2, 3648), dtype=float)
 
             # Wait 0.1 seconds (this is in addition to the 0.2 spectrometer timeout, so 0.3 total)
             flow_data = -1 * np.ones((2, 180), dtype=np.float32)
             if q_flow.empty():
-                print("Flow meters offline")
+                print("Flow meters offline ", end='')
             while q_flow.empty() is False:
                 flow_data = q_flow.get(block=True, timeout=0.1)
                 print("(flow) ", end="", flush=True)
