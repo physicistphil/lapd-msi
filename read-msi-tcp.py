@@ -269,6 +269,8 @@ def save_data(q, q_spec, q_multi, q_flow, path="E:/saved_MSI/"):
                 print("Spectrometer offline ", end='')
                 temp_data['spectrometer'] = np.zeros((2, 3648), dtype=float)
 
+            # Ocassionally this will add two flow meters before getting to this point, but it's better to
+            #   be one ahead for a single shot than one behind for many
             # Wait 0.1 seconds (this is in addition to the 0.2 spectrometer timeout, so 0.3 total)
             flow_data = -1 * np.ones((2, 180), dtype=np.float32)
             if q_flow.empty():
@@ -381,6 +383,7 @@ def send_data_multicast(q, group, port):
     MULTICAST_TTL = 2
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, MULTICAST_TTL)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('192.168.7.3'))
 
     while True:
         data_send = q.get()
